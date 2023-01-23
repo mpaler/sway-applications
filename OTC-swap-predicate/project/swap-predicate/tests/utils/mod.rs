@@ -1,12 +1,12 @@
-use fuel_gql_client::fuel_vm::{consts::REG_ONE, prelude::Opcode};
-
-use fuels::contract::script_calls::ScriptCallHandler;
-use fuels::core::abi_encoder::UnresolvedBytes;
 use fuels::prelude::*;
 use fuels::test_helpers::WalletsConfig;
-use fuels::tx::{AssetId, Contract, Input, Output, TxPointer};
-use fuels::types::param_types::ParamType;
+use fuels::tx::{AssetId, Input, Output, TxPointer};
 use fuels::types::resource::Resource;
+
+abigen!(Predicate(
+    name = "SwapPredicate",
+    abi = "project/swap-predicate/out/debug/swap-predicate-abi.json"
+));
 
 // The fee-paying base asset
 pub const BASE_ASSET: AssetId = AssetId::new([0u8; 32]);
@@ -37,16 +37,6 @@ pub fn configure_wallets(asked_asset: AssetId) -> WalletsConfig {
     )
 }
 
-// Get the bytecode and bytecode root of a predicate, given a path to its binary
-pub fn predicate_bytecode_and_root_from_bin(path_to_bin: &str) -> (Vec<u8>, Bech32Address) {
-    // Get predicate bytecode and root
-    let predicate_bytecode = std::fs::read(path_to_bin).unwrap();
-    let predicate_root: [u8; 32] = (*Contract::root_from_code(&predicate_bytecode)).into();
-    let predicate_root = Address::from(predicate_root);
-    let predicate_root = Bech32Address::from(predicate_root);
-    (predicate_bytecode, predicate_root)
-}
-
 /// Tests that the predicate can be spent. Parameterized by test cases
 pub async fn test_predicate_spend_with_parameters(
     ask_amount: u64,
@@ -72,18 +62,13 @@ pub async fn test_predicate_spend_with_parameters(
 
     let provider = receiver_wallet.get_provider().unwrap();
 
-    let (predicate_bytecode, predicate_root) =
-        predicate_bytecode_and_root_from_bin("../swap-predicate/out/debug/swap-predicate.bin");
+    let predicate =
+        SwapPredicate::load_from("../swap-predicate/out/debug/swap-predicate.bin").unwrap();
 
     // Transfer some coins to the predicate root
     let offered_amount = 1000;
-    let _receipt = receiver_wallet
-        .transfer(
-            &predicate_root,
-            offered_amount,
-            OFFERED_ASSET,
-            TxParameters::default(),
-        )
+    predicate
+        .receive(receiver_wallet, offered_amount, OFFERED_ASSET, None)
         .await
         .unwrap();
 
@@ -95,13 +80,13 @@ pub async fn test_predicate_spend_with_parameters(
 
     // The predicate root has received the coin
     assert_eq!(
-        get_balance(&provider, &predicate_root, OFFERED_ASSET).await,
+        get_balance(provider, &predicate.address(), OFFERED_ASSET).await,
         offered_amount
     );
 
     // Get predicate coin to unlock
     let predicate_coin = &provider
-        .get_spendable_resources(&predicate_root, OFFERED_ASSET, 1)
+        .get_spendable_resources(&predicate.address(), OFFERED_ASSET, 1)
         .await
         .unwrap()[0];
     let predicate_coin_utxo_id = match predicate_coin {
@@ -126,11 +111,11 @@ pub async fn test_predicate_spend_with_parameters(
     let input_predicate = Input::CoinPredicate {
         utxo_id: predicate_coin_utxo_id.into(),
         tx_pointer: TxPointer::default(),
-        owner: Address::from(&predicate_root),
+        owner: predicate.address().into(),
         amount: offered_amount,
         asset_id: OFFERED_ASSET,
         maturity: 0,
-        predicate: predicate_bytecode,
+        predicate: predicate.code(),
         predicate_data: vec![],
     };
 
@@ -166,29 +151,30 @@ pub async fn test_predicate_spend_with_parameters(
         asset_id: asked_asset,
     };
 
-    let script_call_handler: ScriptCallHandler<()> = ScriptCallHandler::new(
-        Opcode::RET(REG_ONE).to_bytes().into_iter().collect(),
-        UnresolvedBytes::default(),
-        taker_wallet.clone(),
-        provider.clone(),
-        ParamType::default(),
-        LogDecoder::default(),
+    let mut tx = Wallet::build_transfer_tx(
+        &[input_predicate, input_from_taker],
+        &[output_to_receiver, output_to_taker, output_asked_change],
+        TxParameters::new(None, Some(10_000_000), None),
     );
 
-    // Sign and execute the transaction
-    let _receipts = script_call_handler
-        .with_inputs(vec![input_predicate, input_from_taker])
-        .with_outputs(vec![
-            output_to_receiver,
-            output_to_taker,
-            output_asked_change,
-        ])
-        .tx_params(TxParameters::new(None, Some(10_000_000), None))
-        .call()
-        .await
-        .unwrap();
+    taker_wallet.sign_transaction(&mut tx).await.unwrap();
+    let _receipts = provider.send_transaction(&tx).await.unwrap();
 
-    let predicate_balance = get_balance(&provider, &predicate_root, OFFERED_ASSET).await;
+    // let script = ScriptBuilder::new()
+    //     .set_inputs(vec![input_predicate, input_from_taker])
+    //     .set_outputs(vec![
+    //         output_to_receiver,
+    //         output_to_taker,
+    //         output_asked_change,
+    //     ])
+    //     .set_gas_limit(10_000_000)
+    //     .set_script(vec![Opcode::RET(REG_ONE)]);
+
+    // // Sign and execute the transaction
+    // let script = script.build(taker_wallet).await.unwrap();
+    // let _receipts = script.call(provider).await.unwrap();
+
+    let predicate_balance = get_balance(provider, &predicate.address(), OFFERED_ASSET).await;
     let taker_asked_token_balance =
         get_balance(&provider, taker_wallet.address(), asked_asset).await;
     let taker_offered_token_balance =
@@ -237,24 +223,19 @@ pub async fn recover_predicate_as_owner(correct_owner: bool) {
 
     let initial_wallet_balance = get_balance(&provider, wallet.address(), OFFERED_ASSET).await;
 
-    let (predicate_bytecode, predicate_root) =
-        predicate_bytecode_and_root_from_bin("../swap-predicate/out/debug/swap-predicate.bin");
+    let predicate =
+        SwapPredicate::load_from("../swap-predicate/out/debug/swap-predicate.bin").unwrap();
 
     // Transfer some coins to the predicate root
     let offered_amount = 1000;
-    let _receipt = wallet
-        .transfer(
-            &predicate_root,
-            offered_amount,
-            OFFERED_ASSET,
-            TxParameters::default(),
-        )
+    predicate
+        .receive(wallet, offered_amount, OFFERED_ASSET, None)
         .await
         .unwrap();
 
     // Get predicate coin to unlock
     let predicate_coin = &provider
-        .get_spendable_resources(&predicate_root, OFFERED_ASSET, 1)
+        .get_spendable_resources(&predicate.address(), OFFERED_ASSET, 1)
         .await
         .unwrap()[0];
     let predicate_coin_utxo_id = match predicate_coin {
@@ -266,12 +247,31 @@ pub async fn recover_predicate_as_owner(correct_owner: bool) {
     let input_predicate = Input::CoinPredicate {
         utxo_id: predicate_coin_utxo_id.into(),
         tx_pointer: TxPointer::default(),
-        owner: Address::from(&predicate_root),
+        owner: predicate.address().into(),
         amount: offered_amount,
         asset_id: OFFERED_ASSET,
         maturity: 0,
-        predicate: predicate_bytecode,
+        predicate: predicate.code(),
         predicate_data: vec![],
+    };
+
+    let base_coin = &provider
+        .get_spendable_resources(wallet.address(), BASE_ASSET, 1)
+        .await
+        .unwrap()[0];
+    let (base_coin_utxo_id, swap_coin_amount) = match base_coin {
+        Resource::Coin(coin) => (coin.utxo_id.clone(), coin.amount.clone()),
+        _ => panic!(),
+    };
+
+    let input_coin = Input::CoinSigned {
+        utxo_id: base_coin_utxo_id.into(),
+        tx_pointer: TxPointer::default(),
+        owner: Address::from(wallet.address()),
+        amount: swap_coin_amount.into(),
+        asset_id: BASE_ASSET,
+        witness_index: 0,
+        maturity: 0,
     };
 
     // Use a change output to send the unlocked coins back to the wallet
@@ -281,26 +281,29 @@ pub async fn recover_predicate_as_owner(correct_owner: bool) {
         asset_id: OFFERED_ASSET,
     };
 
-    let script_call_handler: ScriptCallHandler<()> = ScriptCallHandler::new(
-        Opcode::RET(REG_ONE).to_bytes().into_iter().collect(),
-        UnresolvedBytes::default(),
-        wallet.clone(),
-        provider.clone(),
-        ParamType::default(),
-        LogDecoder::default(),
+    let mut tx = Wallet::build_transfer_tx(
+        &[input_predicate, input_coin],
+        &[output_offered_change],
+        TxParameters::new(None, Some(10_000_000), None),
     );
 
-    // Sign and execute the transaction
-    let _receipts = script_call_handler
-        .with_inputs(vec![input_predicate])
-        .with_outputs(vec![output_offered_change])
-        .tx_params(TxParameters::new(None, Some(10_000_000), None))
-        .call()
-        .await
-        .unwrap();
+    wallet.sign_transaction(&mut tx).await.unwrap();
+    let _receipts = provider.send_transaction(&tx).await.unwrap();
+
+    // // Build the script. The `build` method appends necessary base asset inputs and outputs for gas
+    // let script = ScriptBuilder::new()
+    //     .set_inputs(vec![input_predicate])
+    //     .set_outputs(vec![output_offered_change])
+    //     .set_gas_limit(10_000_000)
+    //     .set_script(vec![Opcode::RET(REG_ONE)]);
+
+    // // Sign and execute the transaction
+    // let script = script.build(wallet).await.unwrap();
+
+    // let _receipts = script.call(provider).await.unwrap();
 
     // The predicate root's coin has been spent
-    let predicate_balance = get_balance(&provider, &predicate_root, OFFERED_ASSET).await;
+    let predicate_balance = get_balance(provider, &predicate.address(), OFFERED_ASSET).await;
     assert_eq!(predicate_balance, 0);
 
     // Wallet balance is the same as before it sent the coins to the predicate
