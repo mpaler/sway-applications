@@ -1,4 +1,7 @@
+use fuels::client::schema::schema::__fields::Transaction::receipts;
+use fuels::core::abi_encoder::UnresolvedBytes;
 use fuels::prelude::*;
+use fuels::programs::script_calls::ScriptCallHandler;
 use fuels::test_helpers::WalletsConfig;
 use fuels::tx::{AssetId, Input, Output, TxPointer};
 use fuels::types::resource::Resource;
@@ -151,14 +154,31 @@ pub async fn test_predicate_spend_with_parameters(
         asset_id: asked_asset,
     };
 
-    let mut tx = Wallet::build_transfer_tx(
-        &[input_predicate, input_from_taker],
-        &[output_to_receiver, output_to_taker, output_asked_change],
-        TxParameters::new(None, Some(10_000_000), None),
-    );
+    // let mut tx = Wallet::build_transfer_tx(
+    //     &[input_predicate, input_from_taker],
+    //     &[output_to_receiver, output_to_taker, output_asked_change],
+    //     TxParameters::new(None, Some(10_000_000), None),
+    // );
 
-    taker_wallet.sign_transaction(&mut tx).await.unwrap();
-    let _receipts = provider.send_transaction(&tx).await.unwrap();
+    // taker_wallet.sign_transaction(&mut tx).await.unwrap();
+    // let _receipts = provider.send_transaction(&tx).await.unwrap();
+
+    let script_call = ScriptCallHandler::<()>::new(
+        vec![],
+        UnresolvedBytes::default(),
+        taker_wallet.clone(),
+        provider.clone(),
+        Default::default(),
+    )
+    .with_inputs(vec![input_predicate, input_from_taker])
+    .with_outputs(vec![
+        output_to_receiver,
+        output_to_taker,
+        output_asked_change,
+    ])
+    .tx_params(TxParameters::new(None, Some(10_000_000), None));
+
+    let _response = script_call.call().await.unwrap();
 
     // let script = ScriptBuilder::new()
     //     .set_inputs(vec![input_predicate, input_from_taker])
@@ -281,14 +301,27 @@ pub async fn recover_predicate_as_owner(correct_owner: bool) {
         asset_id: OFFERED_ASSET,
     };
 
-    let mut tx = Wallet::build_transfer_tx(
-        &[input_predicate, input_coin],
-        &[output_offered_change],
-        TxParameters::new(None, Some(10_000_000), None),
-    );
+    // let mut tx = Wallet::build_transfer_tx(
+    //     &[input_predicate, input_coin],
+    //     &[output_offered_change],
+    //     TxParameters::new(None, Some(10_000_000), None),
+    // );
 
-    wallet.sign_transaction(&mut tx).await.unwrap();
-    let _receipts = provider.send_transaction(&tx).await.unwrap();
+    // wallet.sign_transaction(&mut tx).await.unwrap();
+    // let _receipts = provider.send_transaction(&tx).await.unwrap();
+
+    let script_call = ScriptCallHandler::<()>::new(
+        vec![],
+        UnresolvedBytes::default(),
+        wallet.clone(),
+        provider.clone(),
+        Default::default(),
+    )
+    .with_inputs(vec![input_predicate])
+    .with_outputs(vec![output_offered_change])
+    .tx_params(TxParameters::new(Some(1), Some(10_000_000), None));
+
+    let _response = script_call.call().await.unwrap();
 
     // // Build the script. The `build` method appends necessary base asset inputs and outputs for gas
     // let script = ScriptBuilder::new()

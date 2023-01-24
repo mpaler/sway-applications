@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 fuel-gql-client = { version = "0.14.1", default-features = false }
-fuels = { version = "0.34.0", features = ["fuel-core-lib"] }
+fuels = { git = "https://github.com/FuelLabs/fuels-rs", branch = "hal3e/script-handler-signing" }
 
 tokio = { version = "1.12", features = ["rt", "macros"] }
 
